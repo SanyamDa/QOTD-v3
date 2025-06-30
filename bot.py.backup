@@ -1,0 +1,452 @@
+import logging
+import os
+import random
+import csv
+import random 
+import database
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
+import re
+from openai import AsyncOpenAI
+
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
+import handlers
+
+TOPIC, TONE, QUOTE_LENGTH, AUTHOR_PREF, DELIVERY_TIME, WEEKEND_TOGGLE, CONTEXT_LINE = range(7)
+
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Global quotes list
+quotes = []
+
+quotes = []
+
+def load_quotes():
+    """
+    Load quotes from the CSV file and ensure each has a unique ID.
+    The CSV should have 'quote' and 'author' columns at minimum.
+    """
+    global quotes
+    try:
+        with open('quotes.csv', 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            quotes = []
+            for idx, row in enumerate(reader, 1):
+                # Ensure each quote has an ID - use the line number if not present
+                if 'id' not in row or not row['id']:
+                    row['id'] = idx
+                else:
+                    try:
+                        row['id'] = int(row['id'])
+                    except (ValueError, TypeError):
+                        row['id'] = idx  # Fallback to line number if ID is not a number
+                quotes.append(row)
+                
+        logger.info(f"Loaded {len(quotes)} quotes with IDs.")
+    except FileNotFoundError:
+        logger.error("quotes.csv not found!")
+        quotes = []
+
+async def start_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['topics'] = []
+    keyboard = [
+        ["Startup grit", "Investment Wisdom"],
+        ["Productivity", "Entrepreneurship"],
+        ["Creativity", "Mindfulness"],
+        ["Done"]
+    ]
+    await update.message.reply_text(
+        "Welcome! Let's personalize your daily quotes.\n\n"
+        "Which themes interest you most? (choose up to 3, then tap 'Done')",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True
+        )
+    )
+    return TOPIC
+    
+async def tone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    valid_topics = [
+        "Startup grit", "Investment Wisdom", "Productivity", 
+        "Entrepreneurship", "Creativity", "Mindfulness"
+    ]
+
+    if text == 'Done':
+        if not context.user_data.get('topics'):
+            await update.message.reply_text("Please select at least one topic to continue.")
+            return TOPIC
+        else:
+            keyboard = [["Straight to the point", "Story style"], ["Humorous", "Philosophical"]]
+            await update.message.reply_text(
+                "Great! Now, what tone motivates you?",
+                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            )
+            return TONE
+    
+    if text in valid_topics:
+        topics = context.user_data.get('topics', [])
+        if text not in topics:
+            if len(topics) < 3:
+                topics.append(text)
+                context.user_data['topics'] = topics
+                if len(topics) == 3:
+                    await update.message.reply_text(f"Added '{text}'. You have now selected 3/3 topics. Please tap 'Done' to continue.")
+                else:
+                    await update.message.reply_text(f"Added '{text}'. You have selected {len(topics)}/3 topics. Choose another or tap 'Done'.")
+            else:
+                await update.message.reply_text("You've already selected 3 topics. Please tap 'Done' to continue.")
+        else:
+            await update.message.reply_text(f"You've already chosen '{text}'. Select another or tap 'Done'.")
+    else:
+        await update.message.reply_text("That's not a valid topic. Please choose one from the keyboard or tap 'Done'.")
+
+    return TOPIC
+
+async def quote_length(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['tone'] = update.message.text
+    keyboard = [["Short (< 10 words)", "Medium (10-15 words)", "Long >20 words", "Any length"]]
+    await update.message.reply_text(
+        "How long should the quotes be?",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return QUOTE_LENGTH
+
+async def author_pref(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['quote_length'] = update.message.text
+    await update.message.reply_text(
+        "Got a favourite thinker? (Optional, one name or type 'Skip')",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return AUTHOR_PREF
+
+async def delivery_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['author_pref'] = update.message.text
+    keyboard = [["06:00", "07:00", "08:00"], ["09:00", "18:00"]]
+    await update.message.reply_text(
+        "When would you like to receive your daily quote?",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return DELIVERY_TIME 
+
+async def weekend_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['delivery_time'] = update.message.text
+    keyboard = [["Yes", "Weekdays only"]]
+    await update.message.reply_text(
+        "Do you want quotes on weekends too?",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return WEEKEND_TOGGLE
+    
+async def context_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['weekend_toggle'] = update.message.text
+    keyboard = [["Yes, add takeaway", "No, quote only"]]
+    await update.message.reply_text(
+        "Would you like a one-line takeaway under each quote?",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return CONTEXT_LINE
+
+async def onboarding_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['context_line'] = update.message.text
+    user_id = update.message.from_user.id
+    database.save_user_preferences(user_id, context.user_data)
+    await update.message.reply_text(
+        "Thanks! Your preferences are saved. You'll now get personalized quotes.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Onboarding cancelled.', reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+def escape_markdown(text):
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /start command, adds user to DB."""
+    user_id = update.message.from_user.id
+    database.add_user(user_id)
+    await update.message.reply_text("Hi! You're all set to receive a daily quote. Use /pause to stop or /random for an instant quote.")
+
+
+async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pauses daily quotes for the user."""
+    user_id = update.message.from_user.id
+    database.update_user_status(user_id, is_paused=True)
+    await update.message.reply_text("You've been paused. You won't receive daily quotes. Use /resume to start again.")
+
+async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Resumes daily quotes for the user."""
+    user_id = update.message.from_user.id
+    database.update_user_status(user_id, is_paused=False)
+    await update.message.reply_text("Welcome back! You will now receive daily quotes again.")
+
+async def random_quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a personalized random quote to the user with interactive buttons."""
+    user_id = update.effective_user.id
+    quote_data = get_quote_for_user(user_id)
+    
+    if quote_data:
+        quote_text = f'"{escape_markdown(quote_data["quote"])}"'
+        if quote_data.get('author'):
+            quote_text += f'\n\n- {escape_markdown(quote_data["author"])}'
+        
+        # Get the keyboard with like/dislike/favorite buttons
+        keyboard = handlers.get_quote_keyboard(quote_data['id'], user_id)
+        
+        await update.message.reply_text(
+            quote_text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text("I couldn't find a suitable quote for you right now. Try again later!")
+
+async def send_daily_quote(bot, user_id):
+    """Sends a daily quote to the user with interactive buttons."""
+    # Select a personalized quote for the user
+    quote_data = get_quote_for_user(user_id)
+    
+    if quote_data:
+        quote_text = f'"{escape_markdown(quote_data["quote"])}"'
+        if quote_data.get('author'):
+            quote_text += f'\n\n- {escape_markdown(quote_data["author"])}'
+        
+        # Get the keyboard with like/dislike/favorite buttons
+        keyboard = handlers.get_quote_keyboard(quote_data['id'], user_id)
+        
+        # Send the quote with interactive buttons
+        await bot.send_message(
+            chat_id=user_id,
+            text=quote_text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        logger.info(f"Sent daily quote to user {user_id}")
+    else:
+        await bot.send_message(
+            chat_id=user_id, 
+            text="I couldn't find a suitable quote for you right now. Try again later!"
+        )
+        logger.warning(f"Failed to find a quote for user {user_id}")
+
+async def scheduled_quote_task(bot):
+    """The scheduled task that sends quotes to all active users."""
+    user_ids = database.get_active_users()
+    logger.info(f"Scheduler running for {len(user_ids)} active users.")
+    for user_id in user_ids:
+        await send_daily_quote(bot, user_id)
+
+def get_quote_for_user(user_id: int) -> dict:
+    """
+    Selects a personalized quote for a user based on their preferences.
+    Falls back to less specific criteria if no perfect match is found.
+    Excludes quotes that the user has previously disliked.
+
+    Returns:
+        dict: A quote with 'quote', 'author', and 'id' keys
+    """
+    if not quotes:
+        load_quotes()
+    
+    prefs = database.get_user_preferences(user_id)
+    if not prefs:
+        # If no preferences, return a random quote that's not disliked
+        disliked_quotes = database.get_disliked_quote_ids(user_id)
+        available_quotes = [q for q in quotes if q['id'] not in disliked_quotes]
+        return random.choice(available_quotes) if available_quotes else random.choice(quotes)
+    
+    # Get user preferences
+    topics = [prefs.get('topic1'), prefs.get('topic2'), prefs.get('topic3')]
+    topics = [t.lower() for t in topics if t]  # Filter out None and convert to lowercase
+    
+    # Get disliked quote IDs to exclude
+    disliked_quotes = database.get_disliked_quote_ids(user_id)
+    
+    # Filter quotes by topics and exclude disliked quotes
+    candidate_quotes = []
+    for quote in quotes:
+        if quote['id'] in disliked_quotes:
+            continue
+            
+        if not topics or any(topic in quote['quote'].lower() for topic in topics):
+            candidate_quotes.append(quote)
+    
+    # If no quotes match topics, use all non-disliked quotes
+    candidate_quotes = candidate_quotes if candidate_quotes else [q for q in quotes if q['id'] not in disliked_quotes]
+    
+    # If still no quotes, use all quotes (including disliked ones as last resort)
+    if not candidate_quotes:
+        candidate_quotes = quotes
+    
+    # Filter by author preference if specified
+    if prefs.get('author_pref') and prefs['author_pref'].lower() != 'any':
+        author_quotes = [q for q in candidate_quotes 
+                        if q['author'].lower() == prefs['author_pref'].lower()]
+        if author_quotes:
+            candidate_quotes = author_quotes
+    
+    # Filter by quote length if specified
+    if prefs.get('quote_length') and prefs['quote_length'].lower() != 'any length':
+        length_filtered = []
+        for q in candidate_quotes:
+            word_count = len(q['quote'].split())
+            if prefs['quote_length'] == 'short (< 10 words)' and word_count < 10:
+                length_filtered.append(q)
+            elif prefs['quote_length'] == 'medium (10-15 words)' and 10 <= word_count <= 15:
+                length_filtered.append(q)
+            elif prefs['quote_length'] == 'long >20 words' and word_count > 20:
+                length_filtered.append(q)
+        
+        if length_filtered:  # Only apply if we found matches
+            candidate_quotes = length_filtered
+    
+    # Return a random choice from the filtered list, or from the original list if filtering removed all options
+    return random.choice(candidate_quotes) if candidate_quotes else random.choice(quotes)
+
+async def generate_ai_quote(user_id: int) -> str | None:
+    """Generates a personalized quote using the OpenAI API."""
+    client = AsyncOpenAI()
+    prefs = database.get_user_preferences(user_id)
+    if not prefs:
+        # Default prompt if user has no preferences
+        prompt = "Write a short, insightful quote about life, and attribute it to 'The Universe'."
+    else:
+        # Build a detailed prompt from user preferences
+        user_topics = [prefs.get(f'topic{i}') for i in range(1, 4) if prefs.get(f'topic{i}')]
+        topics_str = ", ".join(user_topics) if user_topics else "general wisdom"
+        
+        tone = prefs.get('tone', 'inspirational')
+        length_pref = prefs.get('quote_length', 'any length')
+
+        prompt = f"""
+            You are “Quotemaster,” a rigorous curator of genuine, verifiable quotations.
+
+            TASK
+            • Return exactly **one** quotation that was actually spoken or written by a real, well-known person (author, thinker, public figure, etc.) and can be validated in reputable sources online.
+
+            MANDATORY FILTERS
+            1. Theme match: The quote must centre on “{topics_str}.”
+            2. Tone: Overall feeling/mood must read as “{tone}.”
+            3. Length: Keep the body of the quotation within the scope “{length_pref}.”
+            • Acceptable length descriptors: very short (≤ 8 words), short (9–15), medium (16–30), long (31–50).
+            • Never exceed the upper bound.
+            4. Originality check: If you have supplied this exact quote to me in the past 25 responses, choose a different one.
+            5. Language: Use the same language the theme was supplied in (default English).
+            6. Source quality: Prefer speeches, published books, interviews, letters, essays. No unsourced social-media posts, no misattributions.
+            7. Output format (STRICT):
+            "Exact quote text." - Full Author Name
+            • Straight double quotes only, no curly quotes.  
+            • One space, hyphen (-), one space, then the author’s full name.  
+            • Nothing before or after that single line—no markdown, numbers, or commentary.
+
+            FAILSAFE
+            • If no suitable quote can be located, reply with the single word: RETRY (nothing else), so the calling program knows to try again.
+
+            Remember: return only the properly formatted quotation line (or “RETRY”). No explanations.
+            """
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a creative and insightful quote generator. You only output the quote and its attribution, nothing else."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=70,
+            temperature=0.9,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"OpenAI API call failed: {e}")
+        return None
+
+async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /generate command, creating a quote with AI."""
+    user_id = update.message.from_user.id
+    await update.message.reply_text("Generating a unique quote for you... this might take a moment.")
+    
+    try:
+        quote_text = await generate_ai_quote(user_id)
+        if quote_text:
+            await update.message.reply_text(quote_text)
+        else:
+            await update.message.reply_text("Sorry, I couldn't generate a quote for you right now. Please try again later.")
+    except Exception as e:
+        logger.error(f"Error generating AI quote for user {user_id}: {e}")
+        await update.message.reply_text("Sorry, there was an error while creating your quote.")
+
+def main() -> None:
+    """Initialize DB, load quotes, and start the bot."""
+    database.init_db()
+    load_quotes()
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        logger.error("BOT_TOKEN environment variable not set!")
+        return
+
+    application = Application.builder().token(token).build()
+
+    # Onboarding conversation handler
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('onboard', start_onboarding)],
+        states={
+            TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, tone)],
+            TONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, quote_length)],
+            QUOTE_LENGTH: [MessageHandler(filters.TEXT & ~filters.COMMAND, author_pref)],
+            AUTHOR_PREF: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_time)],
+            DELIVERY_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, weekend_toggle)],
+            WEEKEND_TOGGLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, context_line)],
+            CONTEXT_LINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_complete)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    application.add_handler(conv_handler)
+
+    # Standard command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("pause", pause))
+    application.add_handler(CommandHandler("resume", resume))
+    application.add_handler(CommandHandler("random", random_quote))
+    application.add_handler(CommandHandler("generate", generate_command))
+    
+    # Register callback handlers for like/dislike/favorite buttons
+    handlers.register_handlers(application)
+
+    # Scheduler for daily quotes
+    scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Bangkok"))
+    scheduler.add_job(
+        scheduled_quote_task,
+        trigger=CronTrigger(hour=7, minute=0),
+        kwargs={'bot': application.bot},
+        id="daily_quotes_task",
+        name="Send Daily Quotes",
+        replace_existing=True
+    )
+    scheduler.start()
+
+    logger.info("Bot started and scheduler is running.")
+    application.run_polling()
+
+
+if __name__ == "__main__":
+    # For local development, load .env file
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    main()
+
+def escape_markdown(text):
+    # Escape Telegram MarkdownV2 special chars
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
