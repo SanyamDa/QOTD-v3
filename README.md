@@ -1,5 +1,8 @@
 # Quote-a-Day Bot
 
+![image](https://github.com/user-attachments/assets/f2b48dc0-4ec3-4ed7-9726-805381ea23dd)
+
+
 A simple Telegram bot that sends one finance/entrepreneurship quote every morning.
 
 ## Features
