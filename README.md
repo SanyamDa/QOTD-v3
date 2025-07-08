@@ -2,6 +2,14 @@
 
 ![image](https://github.com/user-attachments/assets/f2b48dc0-4ec3-4ed7-9726-805381ea23dd)
 
+<div align="center">
+  <a href="https://shipwrecked.hackclub.com/?t=ghrm" target="_blank">
+    <img src="https://hc-cdn.hel1.your-objectstorage.com/s/v3/739361f1d440b17fc9e2f74e49fc185d86cbec14_badge.png" 
+         alt="This project is part of Shipwrecked, the world's first hackathon on an island!" 
+         style="width: 35%;">
+  </a>
+</div>
+
 
 A simple Telegram bot that sends one finance/entrepreneurship quote every morning.
 
@@ -39,6 +47,8 @@ A simple Telegram bot that sends one finance/entrepreneurship quote every mornin
     ```
 
 ## Deployment
+
+
 
 The bot is designed to be deployed as a single Docker container on [Fly.io](https://fly.io/).
 
