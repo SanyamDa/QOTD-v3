@@ -54,6 +54,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_text = (
         "🤖 *Quote Bot Help*\n\n"
         "*Commands:*\n"
+        "TEST SUCCESSFUL"
         "• /start - Start the bot and see welcome message\n"
         "• /random - Get a random quote now\n"
         "• /onboard - Set your preferences\n"
