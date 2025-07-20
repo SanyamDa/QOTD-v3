@@ -64,9 +64,9 @@ async def send_quote_to_user(bot: 'Bot', user_id: int) -> None:
         return
     
     # Format the quote
-    quote_text = f'"{escape_markdown(quote_data["quote"])}"'
+    quote_text = f'<i>"{escape_markdown(quote_data["quote"])}"</i>'
     if quote_data.get('author'):
-        quote_text += f'\n\n- {escape_markdown(quote_data["author"])}'
+        quote_text += f'\n\n— <b>{escape_markdown(quote_data["author"])}</b>'
     
     # Get the keyboard with like/dislike/favorite buttons
     from bot.handlers.callbacks import get_quote_keyboard
@@ -77,6 +77,6 @@ async def send_quote_to_user(bot: 'Bot', user_id: int) -> None:
         chat_id=user_id,
         text=quote_text,
         reply_markup=keyboard,
-        parse_mode='MarkdownV2'
+        parse_mode='HTML'
     )
     logger.info(f"Sent quote {quote_data['id']} to user {user_id}")
